@@ -1,0 +1,11 @@
+
+# .env.example
+PORT=3000
+MCP_API_KEY=your_mcp_api_key_here
+CALLBACK_DEFAULT_SECRET=changeme
+OPENAI_API_KEY=your_openai_api_key_here
+VT_API_KEY=your_virustotal_api_key_here
+URLSCAN_API_KEY=your_urlscan_api_key_here
+WHOIS_API_KEY=your_whois_api_key_here
+META_BSP_TOKEN=your_meta_bsp_token_here
+GOOGLE_VISION_API_KEY=your_google_vision_api_key_here
