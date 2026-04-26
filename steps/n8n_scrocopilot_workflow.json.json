@@ -1,0 +1,696 @@
+
+{
+  "name": "Scam Copilot (Meta BSP → ToolSelector → MCP → Verdict + RAG)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "inbound-whatsapp",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Webhook Inbound",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        250,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "messageId",
+              "value": "={{$json[\"entry\"][0][\"changes\"][0][\"value\"][\"messages\"][0][\"id\"]}}"
+            },
+            {
+              "name": "from",
+              "value": "={{$json[\"entry\"][0][\"changes\"][0][\"value\"][\"messages\"][0][\"from\"]}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json[\"entry\"][0][\"changes\"][0][\"value\"][\"messages\"][0][\"text\"] ? $json[\"entry\"][0][\"changes\"][0][\"value\"][\"messages\"][0][\"text\"][\"body\"] : \"\"}}"
+            },
+            {
+              "name": "mediaId",
+              "value": "={{$json[\"entry\"][0][\"changes\"][0][\"value\"][\"messages\"][0][\"image\"] ? $json[\"entry\"][0][\"changes\"][0][\"value\"][\"messages\"][0][\"image\"][\"id\"] : \"\"}}"
+            },
+            {
+              "name": "timestamp",
+              "value": "={{$json[\"entry\"][0][\"changes\"][0][\"value\"][\"messages\"][0][\"timestamp\"]}}"
+            }
+          ]
+        }
+      },
+      "name": "Set - Normalize",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        500,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "const data = items[0].json;\nconst text = (data.text || '');\nconst urlRegex = /https?:\\/\\/[\\w\\-\\.\\/?&=:%#~+]+/gi;\nconst phoneRegex = /(?:\\+65|65|0)?[89]\\d{7}/g;\nconst urls = text.match(urlRegex) || [];\nconst phones = text.match(phoneRegex) || [];\nconst otpRegex = /\\b(otp|one[- ]time password|one time pwd|verification code)\\b/i;\nconst contains_otp_request = otpRegex.test(text);\nconst media_type = data.mediaId ? 'image' : 'none';\nreturn [{ json: { ...data, urls, phones, contains_otp_request, media_type } }];"
+      },
+      "name": "Function - Extract",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        760,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "requestMethod": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {{$env.OPENAI_API_KEY}}"
+        },
+        "body": {
+          "model": "gpt-4o-mini",
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are a tool-selection agent. Given the inbound message and metadata, return ONLY valid JSON with fields: tools (subset of [\\\"follow_redirects\\\",\\\"whois\\\",\\\"urlscan\\\",\\\"virustotal\\\",\\\"ocr\\\",\\\"screenshot\\\"]), priority (low|normal|high), reason (1-2 sentences). Prefer lightweight checks unless the message indicates high risk."
+            },
+            {
+              "role": "user",
+              "content": " { \"message\": \"{{$json[\\\"text\\\"]}}\", \"urls\": {{$json[\\\"urls\\\"]}}, \"media_type\":\"{{$json[\\\"media_type\\\"]}}\", \"contains_otp_request\": {{$json[\\\"contains_otp_request\\\"]}} }"
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": 220
+        }
+      },
+      "name": "HTTP Request - ToolSelector (OpenAI)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1100,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse the OpenAI tool selector response and output tools, priority\nconst body = items[0].json;\nlet content = null;\ntry {\n  // content may be in choices[0].message.content\n  if (body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) {\n    content = body.choices[0].message.content;\n  } else if (body.choices && body.choices[0] && body.choices[0].text) {\n    content = body.choices[0].text;\n  }\n  if (!content) throw new Error('No content from OpenAI');\n  // strip ``` blocks and whitespace\n  content = content.replace(/```json\\s*/i, '').replace(/```/g, '').trim();\n  const parsed = JSON.parse(content);\n  return [{ json: { tools: parsed.tools || [], priority: parsed.priority || 'normal', reason: parsed.reason || '' } }];\n} catch (err) {\n  // fallback: no tools\n  return [{ json: { tools: [], priority: 'low', reason: 'Could not parse tool selector response' } }];\n}"
+      },
+      "name": "Function - Parse ToolSelector",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        1400,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ $json[\"tools\"].length === 0 }}",
+              "operation": "isTrue"
+            }
+          ]
+        }
+      },
+      "name": "If - No Tools?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        1650,
+        200
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "reply_text",
+              "value": "Thanks — we checked this quickly. It does not contain a link or credential request. If you want a deeper check, please resend the message or the link."
+            }
+          ]
+        }
+      },
+      "name": "Set - Ack Reply (No Tools)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        1900,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "requestMethod": "POST",
+        "url": "https://graph.facebook.com/v15.0/{{$env.META_PHONE_ID}}/messages",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Authorization": "Bearer {{$env.META_BSP_TOKEN}}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "={{$json[\"from\"]}}",
+          "type": "text",
+          "text": {
+            "body": "={{$json[\"reply_text\"]}}"
+          }
+        }
+      },
+      "name": "HTTP Request - Send Ack (Meta BSP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        2150,
+        120
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "requestMethod": "POST",
+        "url": "={{$env.MCP_BASE_URL}}/scan",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Authorization": "Bearer {{$env.MCP_API_KEY}}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "messageId": "={{$json[\"messageId\"]}}",
+          "from": "={{$json[\"from\"]}}",
+          "text": "={{$json[\"text\"]}}",
+          "urls": "={{$json[\"urls\"]}}",
+          "phones": "={{$json[\"phones\"]}}",
+          "tools": "={{$json[\"tools\"]}}",
+          "priority": "={{$json[\"priority\"]}}",
+          "media_id": "={{$json[\"mediaId\"]}}",
+          "callback": "={{$env.N8N_BASE_URL}}/webhook/mcp-callback",
+          "callback_secret": "={{$env.CALLBACK_SECRET}}"
+        }
+      },
+      "name": "HTTP Request - Call MCP /scan",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        1900,
+        280
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "reply_text",
+              "value": "Thanks — we are scanning that for you now and will send the results shortly."
+            }
+          ]
+        }
+      },
+      "name": "Set - Ack Reply (With Scan)",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        2150,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "requestMethod": "POST",
+        "url": "https://graph.facebook.com/v15.0/{{$env.META_PHONE_ID}}/messages",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Authorization": "Bearer {{$env.META_BSP_TOKEN}}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "={{$json[\"from\"]}}",
+          "type": "text",
+          "text": {
+            "body": "={{$json[\"reply_text\"]}}"
+          }
+        }
+      },
+      "name": "HTTP Request - Send Ack (Meta BSP) 2",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        2400,
+        300
+      ]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "mcp-callback",
+        "responseMode": "onReceived",
+        "options": {}
+      },
+      "name": "Webhook MCP Callback",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        2600,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Verify callback secret provided either as header X-Callback-Secret or body.callback_secret\nconst headers = items[0].json.headers || {};\nconst body = items[0].json;\nconst headerSecret = (headers['x-callback-secret'] || headers['X-Callback-Secret'] || headers['x-callback-secret'.toLowerCase()]) || null;\nconst bodySecret = body.callback_secret || null;\nconst expected = process.env.CALLBACK_SECRET;\nif (expected && (headerSecret !== expected && bodySecret !== expected)) {\n  throw new Error('Invalid callback secret');\n}\nreturn items;"
+      },
+      "name": "Function - Verify Callback Secret",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        2850,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "values": {
+          "string": [
+            {
+              "name": "scan_id",
+              "value": "={{$json[\"scan_id\"]}}"
+            },
+            {
+              "name": "messageId",
+              "value": "={{$json[\"messageId\"]}}"
+            },
+            {
+              "name": "from",
+              "value": "={{$json[\"from\"]}}"
+            },
+            {
+              "name": "text",
+              "value": "={{$json[\"text\"]}}"
+            }
+          ],
+          "json": [
+            {
+              "name": "results",
+              "value": "={{$json[\"results\"]}}"
+            }
+          ]
+        }
+      },
+      "name": "Set - Normalize MCP Results",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 1,
+      "position": [
+        3100,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "requestMethod": "POST",
+        "url": "https://api.openai.com/v1/embeddings",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {{$env.OPENAI_API_KEY}}"
+        },
+        "body": {
+          "model": "text-embedding-3-small",
+          "input": "={{$json[\"text\"]}}"
+        }
+      },
+      "name": "HTTP Request - OpenAI Embeddings",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        3350,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "none",
+        "requestMethod": "POST",
+        "url": "={{$env.CHROMA_URL}}/collections/{{$env.CHROMA_COLLECTION}}/query",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "query_embeddings": "={{[$json[\"data\"][0][\"embedding\"]]}}",
+          "n_results": "={{$env.CHROMA_TOP_K || 5}}",
+          "include": [
+            "metadatas",
+            "documents",
+            "ids"
+          ]
+        }
+      },
+      "name": "HTTP Request - Chroma Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        3600,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Compose evidence JSON for final verdict prompt\nconst data = items[0].json;\nconst results = items[0].json.results || items[0].json;\n// If Chroma returned items in previous node, they will be in $items[1]\nlet sources = [];\ntry {\n  if (items.length > 1 && items[1].json && items[1].json.result) {\n    // If Chroma returns in items[1]\n  }\n} catch(e){}\n// For simplicity assume the Chroma response is in items[1]\nif (items[1] && items[1].json && items[1].json.result) {\n  const res = items[1].json.result;\n  if (res && res[0] && res[0].documents) {\n    for (let i=0;i<res.length;i++){\n      const row = res[i];\n      if (row && row.metadatas && row.documents) {\n        for (let j=0;j<row.documents.length;j++){\n          sources.push({ id: (row.ids && row.ids[j]) || null, title: (row.metadatas[j] && row.metadatas[j].title) || null, text: row.documents[j], url: (row.metadatas[j] && row.metadatas[j].url) || null });\n        }\n      }\n    }\n  }\n}\nconst evidence = {\n  text: items[0].json.text || '',\n  urls: items[0].json.urls || [],\n  mcp_results: items[0].json.results || {},\n  sources\n};\nreturn [{ json: { evidence } }];"
+      },
+      "name": "Function - Build Evidence",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        3850,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "requestMethod": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer {{$env.OPENAI_API_KEY}}"
+        },
+        "body": {
+          "model": "gpt-4o-mini",
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are an expert scam analyst for Singapore residents. Use Singapore context (MAS, ScamShield 7726) when relevant. Return ONLY valid JSON with fields: verdict, confidence (0-100), actions (array), short_reply (<=2 sentences), explanation, cited_sources (array). If uncertain, return verdict 'Suspicious' with confidence 40."
+            },
+            {
+              "role": "user",
+              "content": "={{JSON.stringify($json[\"evidence\"])}}"
+            }
+          ],
+          "temperature": 0.0,
+          "max_tokens": 400
+        }
+      },
+      "name": "HTTP Request - OpenAI Verdict",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        4100,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parse final verdict JSON from OpenAI\nconst body = items[0].json;\nlet content = null;\ntry {\n  if (body.choices && body.choices[0] && body.choices[0].message && body.choices[0].message.content) {\n    content = body.choices[0].message.content;\n  } else if (body.choices && body.choices[0] && body.choices[0].text) {\n    content = body.choices[0].text;\n  }\n  if (!content) throw new Error('No content from OpenAI');\n  content = content.replace(/```json\\s*/i, '').replace(/```/g, '').trim();\n  const parsed = JSON.parse(content);\n  return [{ json: { verdict: parsed.verdict || 'Suspicious', confidence: parsed.confidence || 40, short_reply: parsed.short_reply || 'We could not determine; please avoid clicking the link.' } }];\n} catch (err) {\n  return [{ json: { verdict: 'Suspicious', confidence: 40, short_reply: 'We could not determine safely; please avoid clicking links.' } }];\n}"
+      },
+      "name": "Function - Parse Verdict",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [
+        4400,
+        720
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "headerAuth",
+        "requestMethod": "POST",
+        "url": "https://graph.facebook.com/v15.0/{{$env.META_PHONE_ID}}/messages",
+        "responseFormat": "json",
+        "jsonParameters": true,
+        "options": {},
+        "headers": {
+          "Authorization": "Bearer {{$env.META_BSP_TOKEN}}",
+          "Content-Type": "application/json"
+        },
+        "body": {
+          "messaging_product": "whatsapp",
+          "to": "={{$json[\"from\"]}}",
+          "type": "text",
+          "text": {
+            "body": "={{$json[\"short_reply\"]}}"
+          }
+        }
+      },
+      "name": "HTTP Request - Send Final Reply (Meta BSP)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 1,
+      "position": [
+        4700,
+        720
+      ]
+    },
+    {
+      "parameters": {},
+      "name": "No Operation",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        2300,
+        500
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook Inbound": {
+      "main": [
+        [
+          {
+            "node": "Set - Normalize",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Normalize": {
+      "main": [
+        [
+          {
+            "node": "Function - Extract",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Extract": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - ToolSelector (OpenAI)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - ToolSelector (OpenAI)": {
+      "main": [
+        [
+          {
+            "node": "Function - Parse ToolSelector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Parse ToolSelector": {
+      "main": [
+        [
+          {
+            "node": "If - No Tools?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If - No Tools?": {
+      "main": [
+        [
+          {
+            "node": "Set - Ack Reply (No Tools)",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "HTTP Request - Call MCP /scan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ],
+      "main2": []
+    },
+    "Set - Ack Reply (No Tools)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Send Ack (Meta BSP)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - Call MCP /scan": {
+      "main": [
+        [
+          {
+            "node": "Set - Ack Reply (With Scan)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Ack Reply (With Scan)": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Send Ack (Meta BSP) 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - Send Ack (Meta BSP) 2": {
+      "main": [
+        [
+          {
+            "node": "No Operation",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook MCP Callback": {
+      "main": [
+        [
+          {
+            "node": "Function - Verify Callback Secret",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Verify Callback Secret": {
+      "main": [
+        [
+          {
+            "node": "Set - Normalize MCP Results",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Set - Normalize MCP Results": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - OpenAI Embeddings",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Function - Build Evidence",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - OpenAI Embeddings": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Chroma Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - Chroma Query": {
+      "main": [
+        [
+          {
+            "node": "Function - Build Evidence",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "Function - Build Evidence": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - OpenAI Verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP Request - OpenAI Verdict": {
+      "main": [
+        [
+          {
+            "node": "Function - Parse Verdict",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Function - Parse Verdict": {
+      "main": [
+        [
+          {
+            "node": "HTTP Request - Send Final Reply (Meta BSP)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {}
+}

@@ -656,7 +656,7 @@ async function runRequestedTools(req, scanId) {
 //   "max_steps": 6
 // }
 app.post('/agent', requireAuth, async (req, res) => {
-  logger.info(`[${req.requestId}] Received /scan request with body: ${req.body}`);
+  logger.info(`[${req.requestId}] Received /agent request with body: ${req.body}`);
 
   const body = req.body || {};
   const scanId = uuidv4();
